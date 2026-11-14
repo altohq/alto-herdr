@@ -1,0 +1,71 @@
+#!/bin/sh
+# Tells herdr what the Alto session in this pane is doing.
+#
+# `alto attach` runs this each time the attached session's state changes
+# (Alto's `[[attach.report]]`, which the plugin sets up for panes that
+# have HERDR_PANE_ID), with the state in ALTO_REPORT_* variables. It
+# reports the pane as an agent herdr can show, wait on and restore:
+#
+#   working        -> working
+#   needs-you      -> blocked, with the reason as its message
+#   done, idle     -> idle (herdr works out done-and-unseen itself)
+#   ended          -> released: the session is gone
+#   detached, lost -> nothing: the session goes on, and herdr's restore
+#                     runs `alto attach --instead ADDR` to show it again
+#
+# Everything it's given is checked before use: the address and the words
+# are Alto's, but this runs a command with them.
+set -u
+
+pane=${HERDR_PANE_ID:-}
+herdr=${HERDR_BIN_PATH:-herdr}
+state=${ALTO_REPORT_STATE:-}
+address=${ALTO_REPORT_SESSION:-}
+seq=${ALTO_REPORT_SEQ:-}
+
+[ -n "$pane" ] || exit 0
+
+# A session's address (`3`, `studio:3`) and a sequence number, as Alto
+# gives them; anything else isn't told.
+case "$address" in
+    '' | -* | *[!A-Za-z0-9._:@-]*) exit 0 ;;
+esac
+case "$seq" in
+    '' | *[!0-9]*) exit 0 ;;
+esac
+
+case "$state" in
+    working) to=working ;;
+    needs-you) to=blocked ;;
+    done | idle) to=idle ;;
+    ended)
+        exec "$herdr" pane release-agent "$pane" --source alto --agent alto --seq "$seq"
+        ;;
+    *) exit 0 ;;
+esac
+
+# The reason, as one line of plain text: herdr refuses control
+# characters, and it's shown, never run.
+why=$(printf '%s' "${ALTO_REPORT_WHY:-}" | tr -d '\000-\037\177' | cut -c1-200)
+
+# What herdr shows for the pane: the agent there, else what the session
+# is, with its address.
+word() {
+    case "$1" in
+        '' | *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    printf '%s' "$1"
+}
+shown=$(word "${ALTO_REPORT_AGENT:-}" || word "${ALTO_REPORT_KIND:-}" || printf 'alto')
+case "$address" in
+    *:*) host=${address%%:*} ;;
+    *) host=here ;;
+esac
+
+set -- pane report-agent "$pane" --source alto --agent alto --state "$to" --seq "$seq"
+[ -n "$why" ] && [ "$to" = blocked ] && set -- "$@" --message "$why"
+# What herdr runs to restore the pane: typed into its new shell, which
+# with `alto-shell` is a fresh session that `--instead` hands over.
+"$herdr" "$@" -- alto attach --instead "$address" || exit $?
+"$herdr" pane report-metadata "$pane" --source alto --display-agent "$shown · $address" --token "host=$host" >/dev/null 2>&1
+exit 0
